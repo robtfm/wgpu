@@ -230,7 +230,7 @@ impl<A: HalApi> Hub<A> {
         use hal::Surface;
 
         let mut devices = self.devices.write();
-        for element in devices.map.iter() {
+        for (_, element) in devices.map.iter_nonvacant() {
             if let Element::Occupied(ref device, _) = *element {
                 device.prepare_to_die();
             }
@@ -249,7 +249,7 @@ impl<A: HalApi> Hub<A> {
         self.render_pipelines.write().map.clear();
         self.query_sets.write().map.clear();
 
-        for element in surface_guard.map.iter() {
+        for (_, element) in surface_guard.map.iter_nonvacant() {
             if let Element::Occupied(ref surface, _epoch) = *element {
                 if let Some(ref mut present) = surface.presentation.lock().take() {
                     if let Some(device) = present.device.downcast_ref::<A>() {

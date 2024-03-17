@@ -2,7 +2,7 @@ use std::{marker::PhantomData, ops, sync::Arc};
 
 use wgt::Backend;
 
-use crate::{id, resource::Resource, Epoch, Index};
+use crate::{id, resource::Resource, Epoch, FastHashMap, Index};
 
 /// An entry in a `Storage::map` table.
 #[derive(Debug)]
@@ -24,6 +24,44 @@ pub(crate) enum Element<T> {
 #[derive(Clone, Debug)]
 pub(crate) struct InvalidId;
 
+#[derive(Debug)]
+pub(crate) struct VecLike<T> {
+    size: usize,
+    members: FastHashMap<usize, Element<T>>,
+    vacant: Element<T>,
+}
+
+impl<T> VecLike<T> {
+    fn new() -> Self {
+        Self {
+            size: 0,
+            members: Default::default(),
+            vacant: Element::Vacant,
+        }
+    }
+    fn get(&self, ix: usize) -> Option<&Element<T>> {
+        (ix < self.size).then_some(self.members.get(&ix).unwrap_or(&self.vacant))
+    }
+
+    pub(crate) fn iter_nonvacant(&self) -> impl Iterator<Item = (&usize, &Element<T>)> {
+        self.members.iter()
+    }
+
+    pub(crate) fn iter_all(&self) -> impl Iterator<Item = &Element<T>> {
+        (0..self.size).map(|ix| self.members.get(&ix).unwrap_or(&self.vacant))
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.members.clear();
+        self.size = 0;
+    }
+
+    pub(crate) fn drain_nonvacant(&mut self) -> impl Iterator<Item = Element<T>> + '_ {
+        self.size = 0;
+        self.members.drain().map(|(_, elt)| elt)
+    }
+}
+
 /// A table of `T` values indexed by the id type `I`.
 ///
 /// The table is represented as a vector indexed by the ids' index
@@ -35,7 +73,7 @@ where
     T: Resource<I>,
     I: id::TypedId,
 {
-    pub(crate) map: Vec<Element<T>>,
+    pub(crate) map: VecLike<T>,
     kind: &'static str,
     _phantom: PhantomData<I>,
 }
@@ -57,7 +95,7 @@ where
 {
     pub(crate) fn new() -> Self {
         Self {
-            map: Vec::new(),
+            map: VecLike::new(),
             kind: T::TYPE,
             _phantom: PhantomData,
         }
@@ -137,12 +175,15 @@ where
     }
 
     fn insert_impl(&mut self, index: usize, epoch: Epoch, element: Element<T>) {
-        if index >= self.map.len() {
-            self.map.resize_with(index + 1, || Element::Vacant);
+        if index >= self.map.size {
+            if index / 100 > self.map.size / 100 {
+                println!("storage {} -> {}", std::any::type_name::<T>(), index);
+            } 
+            self.map.size = index + 1;
         }
-        match std::mem::replace(&mut self.map[index], element) {
-            Element::Vacant => {}
-            Element::Occupied(_, storage_epoch) => {
+        match self.map.members.insert(index, element) {
+            None => {}
+            Some(Element::Occupied(_, storage_epoch)) => {
                 assert_ne!(
                     epoch,
                     storage_epoch,
@@ -150,7 +191,7 @@ where
                     T::TYPE
                 );
             }
-            Element::Error(storage_epoch, _) => {
+            Some(Element::Error(storage_epoch, _)) => {
                 assert_ne!(
                     epoch,
                     storage_epoch,
@@ -158,6 +199,7 @@ where
                     T::TYPE
                 );
             }
+            _ => panic!(),
         }
     }
 
@@ -179,12 +221,9 @@ where
 
     pub(crate) fn replace_with_error(&mut self, id: I) -> Result<Arc<T>, InvalidId> {
         let (index, epoch, _) = id.unzip();
-        match std::mem::replace(
-            &mut self.map[index as usize],
-            Element::Error(epoch, String::new()),
-        ) {
-            Element::Vacant => panic!("Cannot access vacant resource"),
-            Element::Occupied(value, storage_epoch) => {
+        match self.map.members.insert(index as usize, Element::Error(epoch, String::new())) {
+            None => panic!("Cannot access vacant resource"),
+            Some(Element::Occupied(value, storage_epoch)) => {
                 assert_eq!(epoch, storage_epoch);
                 Ok(value)
             }
@@ -195,29 +234,34 @@ where
     pub(crate) fn force_replace(&mut self, id: I, value: T) {
         log::trace!("User is replacing {}{:?}", T::TYPE, id);
         let (index, epoch, _) = id.unzip();
-        self.map[index as usize] = Element::Occupied(Arc::new(value), epoch);
+        self.map.members.insert(index as usize, Element::Occupied(Arc::new(value), epoch));
     }
 
     pub(crate) fn remove(&mut self, id: I) -> Option<Arc<T>> {
         log::trace!("User is removing {}{:?}", T::TYPE, id);
         let (index, epoch, _) = id.unzip();
-        match std::mem::replace(&mut self.map[index as usize], Element::Vacant) {
-            Element::Occupied(value, storage_epoch) => {
+        match self.map.members.remove(&(index as usize)) {
+            Some(Element::Occupied(value, storage_epoch)) => {
                 assert_eq!(epoch, storage_epoch);
+
+                if self.map.members.capacity() > self.map.members.len() * 2 {
+                    self.map.members.shrink_to_fit();
+                }
+
                 Some(value)
             }
-            Element::Error(..) => None,
-            Element::Vacant => panic!("Cannot remove a vacant resource"),
+            Some(Element::Error(..)) => None,
+            None => panic!("Cannot remove a vacant resource"),
+            _ => panic!(),
         }
     }
 
     pub(crate) fn iter(&self, backend: Backend) -> impl Iterator<Item = (I, &Arc<T>)> {
         self.map
-            .iter()
-            .enumerate()
+            .iter_nonvacant()
             .filter_map(move |(index, x)| match *x {
                 Element::Occupied(ref value, storage_epoch) => {
-                    Some((I::zip(index as Index, storage_epoch, backend), value))
+                    Some((I::zip(*index as Index, storage_epoch, backend), value))
                 }
                 _ => None,
             })
@@ -228,6 +272,6 @@ where
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.map.len()
+        self.map.size
     }
 }

@@ -163,7 +163,7 @@ impl<G: GlobalIdentityHandlerFactory> Drop for Global<G> {
         }
 
         // destroy surfaces
-        for element in surfaces_locked.map.drain(..) {
+        for element in surfaces_locked.map.drain_nonvacant() {
             if let Element::Occupied(arc_surface, _) = element {
                 if let Some(surface) = Arc::into_inner(arc_surface) {
                     self.instance.destroy_surface(surface);

@@ -5,7 +5,7 @@ use crate::{
     id::{self, TypedId},
     Epoch, Index,
 };
-use std::{fmt::Debug, marker::PhantomData, sync::Arc};
+use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, sync::Arc};
 
 /// A simple structure to allocate [`Id`] identifiers.
 ///
@@ -36,7 +36,7 @@ use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 /// [`free`]: IdentityManager::free
 #[derive(Debug)]
 pub(super) struct IdentityValues {
-    free: Vec<(Index, Epoch)>,
+    free: BTreeMap<Index, Epoch>,
     next_index: Index,
     count: usize,
 }
@@ -48,7 +48,7 @@ impl IdentityValues {
     /// different `backend` values are always distinct.
     pub fn alloc<I: TypedId>(&mut self, backend: Backend) -> I {
         self.count += 1;
-        match self.free.pop() {
+        match self.free.pop_first() {
             Some((index, epoch)) => I::zip(index, epoch + 1, backend),
             None => {
                 let index = self.next_index;
@@ -67,7 +67,7 @@ impl IdentityValues {
     /// Free `id`. It will never be returned from `alloc` again.
     pub fn release<I: TypedId>(&mut self, id: I) {
         let (index, epoch, _backend) = id.unzip();
-        self.free.push((index, epoch));
+        self.free.insert(index, epoch);
         self.count -= 1;
     }
 
@@ -98,7 +98,7 @@ impl<I: TypedId> IdentityManager<I> {
     pub fn new() -> Self {
         Self {
             values: Mutex::new(IdentityValues {
-                free: Vec::new(),
+                free: BTreeMap::new(),
                 next_index: 0,
                 count: 0,
             }),

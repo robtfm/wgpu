@@ -188,7 +188,7 @@ impl<I: id::TypedId, T: Resource<I>> Registry<I, T> {
             ..Default::default()
         };
         report.num_allocated = self.identity.values.lock().count();
-        for element in storage.map.iter() {
+        for element in storage.map.iter_all() {
             match *element {
                 Element::Occupied(..) => report.num_kept_from_user += 1,
                 Element::Vacant => report.num_released_from_user += 1,

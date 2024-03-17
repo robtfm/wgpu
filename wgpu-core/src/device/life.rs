@@ -446,6 +446,9 @@ impl<A: HalApi> LifetimeTracker<A> {
             }
             !is_removed
         });
+        if resources_map.capacity() > 2 * resources_map.len() {
+            resources_map.shrink_to_fit();
+        }
         removed_resources
     }
 
