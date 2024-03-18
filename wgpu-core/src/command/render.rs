@@ -877,252 +877,245 @@ impl<'a, A: HalApi> RenderPassInfo<'a, A> {
             ArrayVec::<Option<hal::ColorAttachment<A>>, { hal::MAX_COLOR_ATTACHMENTS }>::new();
         let mut depth_stencil = None;
 
-        {
-            profiling::scope!("RenderPassInfo::start::depth-attach");
-            if let Some(at) = depth_stencil_attachment {
-                let view: &TextureView<A> = trackers
-                    .views
-                    .add_single(view_guard, at.view)
-                    .ok_or(RenderPassErrorInner::InvalidAttachment(at.view))?;
-                check_multiview(view)?;
-                add_view(view, AttachmentErrorLocation::Depth)?;
-    
-                let ds_aspects = view.desc.aspects();
-                if ds_aspects.contains(hal::FormatAspects::COLOR) {
-                    return Err(RenderPassErrorInner::InvalidDepthStencilAttachmentFormat(
-                        view.desc.format,
-                    ));
-                }
-    
-                if !ds_aspects.contains(hal::FormatAspects::STENCIL)
-                    || (at.stencil.load_op == at.depth.load_op
-                        && at.stencil.store_op == at.depth.store_op)
-                {
-                    Self::add_pass_texture_init_actions(
-                        &at.depth,
-                        texture_memory_actions,
-                        view,
-                        &mut pending_discard_init_fixups,
-                    );
-                } else if !ds_aspects.contains(hal::FormatAspects::DEPTH) {
-                    Self::add_pass_texture_init_actions(
-                        &at.stencil,
-                        texture_memory_actions,
-                        view,
-                        &mut pending_discard_init_fixups,
-                    );
-                } else {
-                    // This is the only place (anywhere in wgpu) where Stencil &
-                    // Depth init state can diverge.
-                    //
-                    // To safe us the overhead of tracking init state of texture
-                    // aspects everywhere, we're going to cheat a little bit in
-                    // order to keep the init state of both Stencil and Depth
-                    // aspects in sync. The expectation is that we hit this path
-                    // extremely rarely!
-                    //
-                    // Diverging LoadOp, i.e. Load + Clear:
-                    //
-                    // Record MemoryInitKind::NeedsInitializedMemory for the entire
-                    // surface, a bit wasteful on unit but no negative effect!
-                    //
-                    // Rationale: If the loaded channel is uninitialized it needs
-                    // clearing, the cleared channel doesn't care. (If everything is
-                    // already initialized nothing special happens)
-                    //
-                    // (possible minor optimization: Clear caused by
-                    // NeedsInitializedMemory should know that it doesn't need to
-                    // clear the aspect that was set to C)
-                    let need_init_beforehand =
-                        at.depth.load_op == LoadOp::Load || at.stencil.load_op == LoadOp::Load;
-                    if need_init_beforehand {
-                        pending_discard_init_fixups.extend(
-                            texture_memory_actions.register_init_action(&TextureInitTrackerAction {
-                                texture: view.parent.read().as_ref().unwrap().clone(),
-                                range: TextureInitRange::from(view.selector.clone()),
-                                kind: MemoryInitKind::NeedsInitializedMemory,
-                            }),
-                        );
-                    }
-    
-                    // Diverging Store, i.e. Discard + Store:
-                    //
-                    // Immediately zero out channel that is set to discard after
-                    // we're done with the render pass. This allows us to set the
-                    // entire surface to MemoryInitKind::ImplicitlyInitialized (if
-                    // it isn't already set to NeedsInitializedMemory).
-                    //
-                    // (possible optimization: Delay and potentially drop this zeroing)
-                    if at.depth.store_op != at.stencil.store_op {
-                        if !need_init_beforehand {
-                            texture_memory_actions.register_implicit_init(
-                                view.parent.read().as_ref().unwrap(),
-                                TextureInitRange::from(view.selector.clone()),
-                            );
-                        }
-                        divergent_discarded_depth_stencil_aspect = Some((
-                            if at.depth.store_op == StoreOp::Discard {
-                                wgt::TextureAspect::DepthOnly
-                            } else {
-                                wgt::TextureAspect::StencilOnly
-                            },
-                            view,
-                        ));
-                    } else if at.depth.store_op == StoreOp::Discard {
-                        // Both are discarded using the regular path.
-                        discarded_surfaces.push(TextureSurfaceDiscard {
-                            texture: view.parent.read().as_ref().unwrap().clone(),
-                            mip_level: view.selector.mips.start,
-                            layer: view.selector.layers.start,
-                        });
-                    }
-                }
-    
-                (is_depth_read_only, is_stencil_read_only) = at.depth_stencil_read_only(ds_aspects)?;
-    
-                let usage = if is_depth_read_only
-                    && is_stencil_read_only
-                    && device
-                        .downlevel
-                        .flags
-                        .contains(wgt::DownlevelFlags::READ_ONLY_DEPTH_STENCIL)
-                {
-                    hal::TextureUses::DEPTH_STENCIL_READ | hal::TextureUses::RESOURCE
-                } else {
-                    hal::TextureUses::DEPTH_STENCIL_WRITE
-                };
-                render_attachments.push(view.to_render_attachment(usage));
-    
-                depth_stencil = Some(hal::DepthStencilAttachment {
-                    target: hal::Attachment {
-                        view: view.raw(),
-                        usage,
-                    },
-                    depth_ops: at.depth.hal_ops(),
-                    stencil_ops: at.stencil.hal_ops(),
-                    clear_value: (at.depth.clear_value, at.stencil.clear_value),
-                });
+        if let Some(at) = depth_stencil_attachment {
+            let view: &TextureView<A> = trackers
+                .views
+                .add_single(view_guard, at.view)
+                .ok_or(RenderPassErrorInner::InvalidAttachment(at.view))?;
+            check_multiview(view)?;
+            add_view(view, AttachmentErrorLocation::Depth)?;
+
+            let ds_aspects = view.desc.aspects();
+            if ds_aspects.contains(hal::FormatAspects::COLOR) {
+                return Err(RenderPassErrorInner::InvalidDepthStencilAttachmentFormat(
+                    view.desc.format,
+                ));
             }
-        }
-        {
-            profiling::scope!("RenderPassInfo::start::color-attach");
-    
-            for (index, attachment) in color_attachments.iter().enumerate() {
-                let at = if let Some(attachment) = attachment.as_ref() {
-                    attachment
-                } else {
-                    colors.push(None);
-                    continue;
-                };
-                let color_view: &TextureView<A> = trackers
-                    .views
-                    .add_single(view_guard, at.view)
-                    .ok_or(RenderPassErrorInner::InvalidAttachment(at.view))?;
-                check_multiview(color_view)?;
-                add_view(
-                    color_view,
-                    AttachmentErrorLocation::Color {
-                        index,
-                        resolve: false,
-                    },
-                )?;
-    
-                if !color_view
-                    .desc
-                    .aspects()
-                    .contains(hal::FormatAspects::COLOR)
-                {
-                    return Err(RenderPassErrorInner::ColorAttachment(
-                        ColorAttachmentError::InvalidFormat(color_view.desc.format),
-                    ));
-                }
-    
+
+            if !ds_aspects.contains(hal::FormatAspects::STENCIL)
+                || (at.stencil.load_op == at.depth.load_op
+                    && at.stencil.store_op == at.depth.store_op)
+            {
                 Self::add_pass_texture_init_actions(
-                    &at.channel,
+                    &at.depth,
                     texture_memory_actions,
-                    color_view,
+                    view,
                     &mut pending_discard_init_fixups,
                 );
-                render_attachments
-                    .push(color_view.to_render_attachment(hal::TextureUses::COLOR_TARGET));
-    
-                let mut hal_resolve_target = None;
-                if let Some(resolve_target) = at.resolve_target {
-                    let resolve_view: &TextureView<A> = trackers
-                        .views
-                        .add_single(view_guard, resolve_target)
-                        .ok_or(RenderPassErrorInner::InvalidAttachment(resolve_target))?;
-    
-                    check_multiview(resolve_view)?;
-    
-                    let resolve_location = AttachmentErrorLocation::Color {
-                        index,
-                        resolve: true,
-                    };
-    
-                    let render_extent = resolve_view.render_extent.map_err(|reason| {
-                        RenderPassErrorInner::TextureViewIsNotRenderable {
-                            location: resolve_location,
-                            reason,
-                        }
-                    })?;
-                    if color_view.render_extent.unwrap() != render_extent {
-                        return Err(RenderPassErrorInner::AttachmentsDimensionMismatch {
-                            expected_location: attachment_location,
-                            expected_extent: extent.unwrap_or_default(),
-                            actual_location: resolve_location,
-                            actual_extent: render_extent,
-                        });
-                    }
-                    if color_view.samples == 1 || resolve_view.samples != 1 {
-                        return Err(RenderPassErrorInner::InvalidResolveSampleCounts {
-                            location: resolve_location,
-                            src: color_view.samples,
-                            dst: resolve_view.samples,
-                        });
-                    }
-                    if color_view.desc.format != resolve_view.desc.format {
-                        return Err(RenderPassErrorInner::MismatchedResolveTextureFormat {
-                            location: resolve_location,
-                            src: color_view.desc.format,
-                            dst: resolve_view.desc.format,
-                        });
-                    }
-                    if !resolve_view
-                        .format_features
-                        .flags
-                        .contains(wgt::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
-                    {
-                        return Err(RenderPassErrorInner::UnsupportedResolveTargetFormat {
-                            location: resolve_location,
-                            format: resolve_view.desc.format,
-                        });
-                    }
-    
-                    texture_memory_actions.register_implicit_init(
-                        resolve_view.parent.read().as_ref().unwrap(),
-                        TextureInitRange::from(resolve_view.selector.clone()),
+            } else if !ds_aspects.contains(hal::FormatAspects::DEPTH) {
+                Self::add_pass_texture_init_actions(
+                    &at.stencil,
+                    texture_memory_actions,
+                    view,
+                    &mut pending_discard_init_fixups,
+                );
+            } else {
+                // This is the only place (anywhere in wgpu) where Stencil &
+                // Depth init state can diverge.
+                //
+                // To safe us the overhead of tracking init state of texture
+                // aspects everywhere, we're going to cheat a little bit in
+                // order to keep the init state of both Stencil and Depth
+                // aspects in sync. The expectation is that we hit this path
+                // extremely rarely!
+                //
+                // Diverging LoadOp, i.e. Load + Clear:
+                //
+                // Record MemoryInitKind::NeedsInitializedMemory for the entire
+                // surface, a bit wasteful on unit but no negative effect!
+                //
+                // Rationale: If the loaded channel is uninitialized it needs
+                // clearing, the cleared channel doesn't care. (If everything is
+                // already initialized nothing special happens)
+                //
+                // (possible minor optimization: Clear caused by
+                // NeedsInitializedMemory should know that it doesn't need to
+                // clear the aspect that was set to C)
+                let need_init_beforehand =
+                    at.depth.load_op == LoadOp::Load || at.stencil.load_op == LoadOp::Load;
+                if need_init_beforehand {
+                    pending_discard_init_fixups.extend(
+                        texture_memory_actions.register_init_action(&TextureInitTrackerAction {
+                            texture: view.parent.read().as_ref().unwrap().clone(),
+                            range: TextureInitRange::from(view.selector.clone()),
+                            kind: MemoryInitKind::NeedsInitializedMemory,
+                        }),
                     );
-                    render_attachments
-                        .push(resolve_view.to_render_attachment(hal::TextureUses::COLOR_TARGET));
-    
-                    hal_resolve_target = Some(hal::Attachment {
-                        view: resolve_view.raw(),
-                        usage: hal::TextureUses::COLOR_TARGET,
+                }
+
+                // Diverging Store, i.e. Discard + Store:
+                //
+                // Immediately zero out channel that is set to discard after
+                // we're done with the render pass. This allows us to set the
+                // entire surface to MemoryInitKind::ImplicitlyInitialized (if
+                // it isn't already set to NeedsInitializedMemory).
+                //
+                // (possible optimization: Delay and potentially drop this zeroing)
+                if at.depth.store_op != at.stencil.store_op {
+                    if !need_init_beforehand {
+                        texture_memory_actions.register_implicit_init(
+                            view.parent.read().as_ref().unwrap(),
+                            TextureInitRange::from(view.selector.clone()),
+                        );
+                    }
+                    divergent_discarded_depth_stencil_aspect = Some((
+                        if at.depth.store_op == StoreOp::Discard {
+                            wgt::TextureAspect::DepthOnly
+                        } else {
+                            wgt::TextureAspect::StencilOnly
+                        },
+                        view,
+                    ));
+                } else if at.depth.store_op == StoreOp::Discard {
+                    // Both are discarded using the regular path.
+                    discarded_surfaces.push(TextureSurfaceDiscard {
+                        texture: view.parent.read().as_ref().unwrap().clone(),
+                        mip_level: view.selector.mips.start,
+                        layer: view.selector.layers.start,
                     });
                 }
-    
-                colors.push(Some(hal::ColorAttachment {
-                    target: hal::Attachment {
-                        view: color_view.raw(),
-                        usage: hal::TextureUses::COLOR_TARGET,
-                    },
-                    resolve_target: hal_resolve_target,
-                    ops: at.channel.hal_ops(),
-                    clear_value: at.channel.clear_value,
-                }));
-            }    
+            }
+
+            (is_depth_read_only, is_stencil_read_only) = at.depth_stencil_read_only(ds_aspects)?;
+
+            let usage = if is_depth_read_only
+                && is_stencil_read_only
+                && device
+                    .downlevel
+                    .flags
+                    .contains(wgt::DownlevelFlags::READ_ONLY_DEPTH_STENCIL)
+            {
+                hal::TextureUses::DEPTH_STENCIL_READ | hal::TextureUses::RESOURCE
+            } else {
+                hal::TextureUses::DEPTH_STENCIL_WRITE
+            };
+            render_attachments.push(view.to_render_attachment(usage));
+
+            depth_stencil = Some(hal::DepthStencilAttachment {
+                target: hal::Attachment {
+                    view: view.raw(),
+                    usage,
+                },
+                depth_ops: at.depth.hal_ops(),
+                stencil_ops: at.stencil.hal_ops(),
+                clear_value: (at.depth.clear_value, at.stencil.clear_value),
+            });
         }
+        for (index, attachment) in color_attachments.iter().enumerate() {
+            let at = if let Some(attachment) = attachment.as_ref() {
+                attachment
+            } else {
+                colors.push(None);
+                continue;
+            };
+            let color_view: &TextureView<A> = trackers
+                .views
+                .add_single(view_guard, at.view)
+                .ok_or(RenderPassErrorInner::InvalidAttachment(at.view))?;
+            check_multiview(color_view)?;
+            add_view(
+                color_view,
+                AttachmentErrorLocation::Color {
+                    index,
+                    resolve: false,
+                },
+            )?;
+
+            if !color_view
+                .desc
+                .aspects()
+                .contains(hal::FormatAspects::COLOR)
+            {
+                return Err(RenderPassErrorInner::ColorAttachment(
+                    ColorAttachmentError::InvalidFormat(color_view.desc.format),
+                ));
+            }
+
+            Self::add_pass_texture_init_actions(
+                &at.channel,
+                texture_memory_actions,
+                color_view,
+                &mut pending_discard_init_fixups,
+            );
+            render_attachments
+                .push(color_view.to_render_attachment(hal::TextureUses::COLOR_TARGET));
+
+            let mut hal_resolve_target = None;
+            if let Some(resolve_target) = at.resolve_target {
+                let resolve_view: &TextureView<A> = trackers
+                    .views
+                    .add_single(view_guard, resolve_target)
+                    .ok_or(RenderPassErrorInner::InvalidAttachment(resolve_target))?;
+
+                check_multiview(resolve_view)?;
+
+                let resolve_location = AttachmentErrorLocation::Color {
+                    index,
+                    resolve: true,
+                };
+
+                let render_extent = resolve_view.render_extent.map_err(|reason| {
+                    RenderPassErrorInner::TextureViewIsNotRenderable {
+                        location: resolve_location,
+                        reason,
+                    }
+                })?;
+                if color_view.render_extent.unwrap() != render_extent {
+                    return Err(RenderPassErrorInner::AttachmentsDimensionMismatch {
+                        expected_location: attachment_location,
+                        expected_extent: extent.unwrap_or_default(),
+                        actual_location: resolve_location,
+                        actual_extent: render_extent,
+                    });
+                }
+                if color_view.samples == 1 || resolve_view.samples != 1 {
+                    return Err(RenderPassErrorInner::InvalidResolveSampleCounts {
+                        location: resolve_location,
+                        src: color_view.samples,
+                        dst: resolve_view.samples,
+                    });
+                }
+                if color_view.desc.format != resolve_view.desc.format {
+                    return Err(RenderPassErrorInner::MismatchedResolveTextureFormat {
+                        location: resolve_location,
+                        src: color_view.desc.format,
+                        dst: resolve_view.desc.format,
+                    });
+                }
+                if !resolve_view
+                    .format_features
+                    .flags
+                    .contains(wgt::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+                {
+                    return Err(RenderPassErrorInner::UnsupportedResolveTargetFormat {
+                        location: resolve_location,
+                        format: resolve_view.desc.format,
+                    });
+                }
+
+                texture_memory_actions.register_implicit_init(
+                    resolve_view.parent.read().as_ref().unwrap(),
+                    TextureInitRange::from(resolve_view.selector.clone()),
+                );
+                render_attachments
+                    .push(resolve_view.to_render_attachment(hal::TextureUses::COLOR_TARGET));
+
+                hal_resolve_target = Some(hal::Attachment {
+                    view: resolve_view.raw(),
+                    usage: hal::TextureUses::COLOR_TARGET,
+                });
+            }
+
+            colors.push(Some(hal::ColorAttachment {
+                target: hal::Attachment {
+                    view: color_view.raw(),
+                    usage: hal::TextureUses::COLOR_TARGET,
+                },
+                resolve_target: hal_resolve_target,
+                ops: at.channel.hal_ops(),
+                clear_value: at.channel.clear_value,
+            }));
+        }    
 
         let extent = extent.ok_or(RenderPassErrorInner::MissingAttachments)?;
         let multiview = detected_multiview.expect("Multiview was not detected, no attachments");
@@ -1194,21 +1187,13 @@ impl<'a, A: HalApi> RenderPassInfo<'a, A> {
             timestamp_writes,
             occlusion_query_set,
         };
-        {
-            profiling::scope!("RenderPassInfo::start::encoder-start");
-            unsafe {
-                encoder.raw.begin_render_pass(&hal_desc);
-            };    
-        }
-
-        let usage_scope = {
-            profiling::scope!("RenderPassInfo::start::usage-scope");
-            UsageScope::new(buffer_guard, texture_guard)
-        };
+        unsafe {
+            encoder.raw.begin_render_pass(&hal_desc);
+        };    
 
         Ok(Self {
             context,
-            usage_scope,
+            usage_scope: UsageScope::new(buffer_guard, texture_guard),
             render_attachments,
             is_depth_read_only,
             is_stencil_read_only,
