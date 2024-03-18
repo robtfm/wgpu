@@ -7,7 +7,7 @@
 
 use std::{borrow::Cow, marker::PhantomData, sync::Arc};
 
-use super::{PendingTransition, ResourceTracker};
+use super::{pool::{BitvecPool, VecPool}, PendingTransition, ResourceTracker};
 use crate::{
     hal_api::HalApi,
     id::{BufferId, TypedId},
@@ -105,6 +105,10 @@ impl<A: HalApi> BufferBindGroupState<A> {
     }
 }
 
+static STATE_POOL: VecPool = VecPool::new();
+static RES_POOL: VecPool = VecPool::new();
+static RES_BIT_POOL: BitvecPool = BitvecPool::new();
+
 /// Stores all buffer state within a single usage scope.
 #[derive(Debug)]
 pub(crate) struct BufferUsageScope<A: HalApi> {
@@ -113,12 +117,23 @@ pub(crate) struct BufferUsageScope<A: HalApi> {
     metadata: ResourceMetadata<A, BufferId, Buffer<A>>,
 }
 
+impl<A: HalApi> Drop for BufferUsageScope<A> {
+    fn drop(&mut self) {
+        let (bits, res) = self.metadata.return_vecs();
+        RES_BIT_POOL.put(bits);
+        unsafe {
+            STATE_POOL.put(&mut self.state);
+            RES_POOL.put(res);
+        }
+    }
+}
+
 impl<A: HalApi> BufferUsageScope<A> {
     pub fn new() -> Self {
         Self {
-            state: Vec::new(),
-
-            metadata: ResourceMetadata::new(),
+            // safety: not safe if we have multiple HapApis in a single execution
+            state: unsafe { STATE_POOL.get() },
+            metadata: ResourceMetadata::new_with_vecs(RES_BIT_POOL.get(), unsafe { RES_POOL.get() }),
         }
     }
 
