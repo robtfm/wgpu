@@ -3,12 +3,7 @@ use crate::device::trace;
 use crate::{
     binding_model::{self, BindGroupLayout, BindGroupLayoutEntryError},
     command, conv,
-    device::life::{LifetimeTracker, WaitIdleError},
-    device::queue::PendingWrites,
-    device::{
-        bgl, AttachmentData, CommandAllocator, DeviceLostInvocation, MissingDownlevelFlags,
-        MissingFeatures, RenderPassContext, CLEANUP_WAIT_MS,
-    },
+    device::{bgl, life::{LifetimeTracker, WaitIdleError}, queue::PendingWrites, AttachmentData, CommandAllocator, DeviceLostInvocation, MissingDownlevelFlags, MissingFeatures, RenderPassContext, CLEANUP_WAIT_MS},
     hal_api::HalApi,
     hal_label,
     hub::Hub,
@@ -21,15 +16,11 @@ use crate::{
     pipeline,
     pool::ResourcePool,
     registry::Registry,
-    resource::ResourceInfo,
-    resource::{
-        self, Buffer, QuerySet, Resource, ResourceType, Sampler, Texture, TextureView,
-        TextureViewNotRenderableReason,
-    },
+    resource::{self, Buffer, QuerySet, Resource, ResourceInfo, ResourceType, Sampler, Texture, TextureView, TextureViewNotRenderableReason},
     resource_log,
     snatch::{SnatchGuard, SnatchLock, Snatchable},
     storage::Storage,
-    track::{BindGroupStates, TextureSelector, Tracker},
+    track::{BindGroupStates, TextureSelector, Tracker, UsageScope},
     validation::{self, check_buffer_usage, check_texture_usage},
     FastHashMap, LabelHelpers as _, SubmissionIndex,
 };
@@ -131,6 +122,8 @@ pub struct Device<A: HalApi> {
     pub(crate) pending_writes: Mutex<Option<PendingWrites<A>>>,
     #[cfg(feature = "trace")]
     pub(crate) trace: Mutex<Option<trace::Trace>>,
+
+    usage_scopes: Mutex<Vec<UsageScope<'static, A>>>,
 }
 
 impl<A: HalApi> std::fmt::Debug for Device<A> {
@@ -285,6 +278,7 @@ impl<A: HalApi> Device<A> {
             downlevel,
             instance_flags,
             pending_writes: Mutex::new(Some(pending_writes)),
+            usage_scopes: Mutex::default(),
         })
     }
 
@@ -3345,6 +3339,15 @@ impl<A: HalApi> Device<A> {
         // Eagerly release GPU resources.
         life_lock.release_gpu_resources();
     }
+
+    pub(crate) fn get_usage_scope<'a>(&'a self, bs: usize, ts: usize) -> UsageScope<'a, A> {
+        let usage_scope = self.usage_scopes.lock().pop().unwrap_or_default();
+        usage_scope.set_device(self, bs, ts)
+    }
+
+    pub(crate) fn put_usage_scope(&self, usage_scope: UsageScope<'static, A>) {
+        self.usage_scopes.lock().push(usage_scope);
+    }    
 }
 
 impl<A: HalApi> Device<A> {

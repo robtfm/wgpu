@@ -724,9 +724,9 @@ impl<A: HalApi> TextureView<A> {
 const MAX_TOTAL_ATTACHMENTS: usize = hal::MAX_COLOR_ATTACHMENTS + hal::MAX_COLOR_ATTACHMENTS + 1;
 type AttachmentDataVec<T> = ArrayVec<T, MAX_TOTAL_ATTACHMENTS>;
 
-struct RenderPassInfo<'a, A: HalApi> {
+struct RenderPassInfo<'a, 'd, A: HalApi> {
     context: RenderPassContext,
-    usage_scope: UsageScope<A>,
+    usage_scope: UsageScope<'d, A>,
     /// All render attachments, including depth/stencil
     render_attachments: AttachmentDataVec<RenderAttachment<'a, A>>,
     is_depth_read_only: bool,
@@ -739,7 +739,7 @@ struct RenderPassInfo<'a, A: HalApi> {
     multiview: Option<NonZeroU32>,
 }
 
-impl<'a, A: HalApi> RenderPassInfo<'a, A> {
+impl<'a, 'd, A: HalApi> RenderPassInfo<'a, 'd, A> {
     fn add_pass_texture_init_actions<V>(
         channel: &PassChannel<V>,
         texture_memory_actions: &mut CommandBufferTextureMemoryActions<A>,
@@ -775,7 +775,7 @@ impl<'a, A: HalApi> RenderPassInfo<'a, A> {
     }
 
     fn start(
-        device: &Device<A>,
+        device: &'d Device<A>,
         label: Option<&str>,
         color_attachments: &[Option<RenderPassColorAttachment>],
         depth_stencil_attachment: Option<&RenderPassDepthStencilAttachment>,
@@ -1194,7 +1194,7 @@ impl<'a, A: HalApi> RenderPassInfo<'a, A> {
 
         Ok(Self {
             context,
-            usage_scope: UsageScope::new(buffer_guard, texture_guard),
+            usage_scope: device.get_usage_scope(buffer_guard.len(), texture_guard.len()),
             render_attachments,
             is_depth_read_only,
             is_stencil_read_only,
@@ -1209,7 +1209,7 @@ impl<'a, A: HalApi> RenderPassInfo<'a, A> {
     fn finish(
         mut self,
         raw: &mut A::CommandEncoder,
-    ) -> Result<(UsageScope<A>, SurfacesInDiscardState<A>), RenderPassErrorInner> {
+    ) -> Result<(UsageScope<'d, A>, SurfacesInDiscardState<A>), RenderPassErrorInner> {
         profiling::scope!("RenderPassInfo::finish");
         unsafe {
             raw.end_render_pass();

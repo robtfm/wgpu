@@ -1115,7 +1115,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                 .fetch_add(1, Ordering::Relaxed)
                 + 1;
             let mut active_executions = Vec::new();
-            let mut used_surface_textures = track::TextureUsageScope::new();
+            let mut used_surface_textures = track::TextureUsageScope::default();
 
             let snatch_guard = device.snatchable_lock.read();
 
@@ -1384,7 +1384,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
                                 baked.encoder.end_encoding().unwrap()
                             };
                             baked.list.push(present);
-                            used_surface_textures = track::TextureUsageScope::new();
+                            used_surface_textures = track::TextureUsageScope::default();
                         }
 
                         // done

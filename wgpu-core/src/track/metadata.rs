@@ -38,6 +38,11 @@ impl<A: HalApi, I: TypedId, T: Resource<I>> ResourceMetadata<A, I, T> {
         self.owned.len()
     }
 
+    pub(super) fn clear(&mut self) {
+        self.resources.clear();
+        self.owned.clear();
+    }
+
     pub(super) fn set_size(&mut self, size: usize) {
         self.resources.resize(size, None);
         resize_bitvec(&mut self.owned, size);
