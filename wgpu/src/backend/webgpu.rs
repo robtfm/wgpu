@@ -2558,13 +2558,12 @@ impl dispatch::QueueInterface for WebQueue {
         dest: crate::CopyExternalImageDestInfo<&crate::api::Texture>,
         size: crate::Extent3d,
     ) {
-        self.inner
+        let _ = self.inner
             .copy_external_image_to_texture_with_gpu_extent_3d_dict(
                 &map_external_texture_copy_view(source),
                 &map_tagged_texture_copy_view(dest),
                 &map_extent_3d(size),
-            )
-            .unwrap();
+            );
     }
 
     fn submit(
